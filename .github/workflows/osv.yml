@@ -1,0 +1,102 @@
+name: OSV Scanner PoC
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # 7.0 = fail on High/Critical
+  # 9.0 = fail on Critical only
+  OSV_CVSS_THRESHOLD: "4.0"
+
+jobs:
+  osv:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run OSV-Scanner using official action
+        uses: google/osv-scanner-action/osv-scanner-action@v2.3.5
+        continue-on-error: true
+        with:
+          scan-args: |-
+            --config=osv-scanner.toml
+            --format=json
+            --output=osv-results.json
+            --recursive
+            ./
+
+      - name: Fail only above CVSS threshold
+        run: |
+          if [ ! -f osv-results.json ]; then
+            echo "osv-results.json was not created."
+            echo "The scanner may have failed before producing output."
+            exit 1
+          fi
+
+          python - <<'PY'
+          import json
+          import os
+          import re
+          import sys
+
+          threshold = float(os.environ.get("OSV_CVSS_THRESHOLD", "7.0"))
+
+          with open("osv-results.json", "r", encoding="utf-8") as f:
+              data = json.load(f)
+
+          failing = []
+
+          for result in data.get("results", []):
+              for package in result.get("packages", []):
+                  pkg = package.get("package", {})
+                  vulns = package.get("vulnerabilities", [])
+
+                  for vuln in vulns:
+                      vuln_id = vuln.get("id", "UNKNOWN")
+                      summary = vuln.get("summary", "")
+                      scores = []
+
+                      for sev in vuln.get("severity", []):
+                          raw_score = str(sev.get("score", ""))
+
+                          # Simple PoC: catches numeric CVSS values like 7.5 or 9.8.
+                          # Some OSV records use CVSS vectors; this PoC may not score those.
+                          match = re.search(r"\b(10(?:\.0)?|[0-9](?:\.[0-9])?)\b", raw_score)
+                          if match:
+                              scores.append(float(match.group(1)))
+
+                      if not scores:
+                          print(f"NO CVSS FOUND: {vuln_id} | {pkg.get('name')} | not failing CI")
+                          continue
+
+                      max_score = max(scores)
+
+                      if max_score >= threshold:
+                          failing.append((vuln_id, max_score, pkg.get("name"), pkg.get("version"), summary))
+                      else:
+                          print(f"BELOW THRESHOLD: {vuln_id} | CVSS {max_score} | {pkg.get('name')}")
+
+          if failing:
+              print("")
+              print(f"Failing because these findings are >= CVSS {threshold}:")
+              for vuln_id, score, name, version, summary in failing:
+                  print(f"- {vuln_id} | CVSS {score} | {name}=={version}")
+                  if summary:
+                      print(f"  {summary}")
+              sys.exit(1)
+
+          print(f"No vulnerabilities at or above CVSS {threshold}. CI passes.")
+          PY
+
+      - name: Upload OSV result JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: osv-results
+          path: osv-results.json
