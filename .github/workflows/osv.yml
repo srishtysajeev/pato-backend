@@ -29,6 +29,7 @@ jobs:
             --format=json
             --output=osv-results.json
             --recursive
+            --allow-no-lockfiles
             ./
 
       - name: Fail only above CVSS threshold
