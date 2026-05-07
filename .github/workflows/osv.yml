@@ -53,6 +53,19 @@ jobs:
 
           failing = []
 
+                    results = data.get("results") or []
+
+          if not results:
+              print("No OSV results found.")
+              print("This usually means no supported package sources were found, or no vulnerabilities were found.")
+              print("CI passes.")
+              sys.exit(0)
+
+          for result in results:
+              for package in result.get("packages") or []:
+                  pkg = package.get("package") or {}
+                  vulns = package.get("vulnerabilities") or []
+                  
           for result in data.get("results", []):
               for package in result.get("packages", []):
                   pkg = package.get("package", {})
