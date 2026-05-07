@@ -52,8 +52,7 @@ jobs:
               data = json.load(f)
 
           failing = []
-
-                    results = data.get("results") or []
+          results = data.get("results") or []
 
           if not results:
               print("No OSV results found.")
