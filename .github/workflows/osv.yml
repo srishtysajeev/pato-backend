@@ -27,6 +27,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install uv
           uv pip compile pyproject.toml --all-extras -o requirements-osv.txt
+          cat requirements-osv.txt
 
       - name: Run OSV-Scanner using official action
         uses: google/osv-scanner-action/osv-scanner-action@v2.3.5
@@ -35,9 +36,8 @@ jobs:
           scan-args: |-
             --config=osv-scanner.toml
             --format=json
-            --output=osv-results.json
+            --output-file=osv-results.json
             --recursive
-            --allow-no-lockfiles
             ./
 
       - name: Fail only above CVSS threshold
