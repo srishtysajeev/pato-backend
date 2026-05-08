@@ -29,6 +29,9 @@ jobs:
           uv pip compile pyproject.toml --all-extras -o requirements-osv.txt
           cat requirements-osv.txt
 
+      - name: Show what OSV is scanning
+        run: osv-scanner --experimental-print-all-deps -r requirements-osv.txt
+
       - name: Run OSV-Scanner using official action
         uses: google/osv-scanner-action/osv-scanner-action@v2.3.5
         continue-on-error: true
