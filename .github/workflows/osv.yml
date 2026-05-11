@@ -20,17 +20,32 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Generate a resolved requirements file from pyproject.toml
-      # so OSV has an actual Python dependency source to scan.
-      - name: Generate requirements file for OSV
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Generate runtime and dev dependency files separately.
+      # This makes it clearer which dependency set OSV scanned,
+      # and avoids mixing everything into one --all-extras file.
+      - name: Generate requirements files for OSV
         run: |
           python -m pip install --upgrade pip
           python -m pip install uv
-          uv pip compile pyproject.toml --all-extras -o requirements-osv.txt
-          cat requirements-osv.txt
 
-      - name: Show what OSV is scanning
-        run: osv-scanner --experimental-print-all-deps -r requirements-osv.txt
+          echo "Generating runtime requirements..."
+          uv pip compile pyproject.toml -o requirements-runtime-osv.txt
+
+          echo "Generating dev requirements..."
+          uv pip compile pyproject.toml --extra dev -o requirements-dev-osv.txt
+
+          echo ""
+          echo "===== Runtime requirements ====="
+          cat requirements-runtime-osv.txt
+
+          echo ""
+          echo "===== Dev requirements ====="
+          cat requirements-dev-osv.txt
 
       - name: Run OSV-Scanner using official action
         uses: google/osv-scanner-action/osv-scanner-action@v2.3.5
@@ -40,8 +55,8 @@ jobs:
             --config=osv-scanner.toml
             --format=json
             --output-file=osv-results.json
-            --recursive
-            ./
+            -L requirements-runtime-osv.txt
+            -L requirements-dev-osv.txt
 
       - name: Fail only above CVSS threshold
         run: |
@@ -51,76 +66,150 @@ jobs:
             exit 1
           fi
 
+          python -m pip install cvss
+
           python - <<'PY'
           import json
           import os
           import re
           import sys
 
+          from cvss import CVSS2, CVSS3
+
           threshold = float(os.environ.get("OSV_CVSS_THRESHOLD", "7.0"))
 
           with open("osv-results.json", "r", encoding="utf-8") as f:
               data = json.load(f)
 
+          def score_from_raw_value(raw_score):
+              if raw_score is None:
+                  return None
+
+              raw_score = str(raw_score).strip()
+
+              if not raw_score:
+                  return None
+
+              # CVSS v3 vector, for example:
+              # CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H
+              try:
+                  if raw_score.startswith("CVSS:3."):
+                      return float(CVSS3(raw_score).scores()[0])
+              except Exception:
+                  pass
+
+              # CVSS v2 vector, for example:
+              # AV:N/AC:L/Au:N/C:P/I:P/A:P
+              try:
+                  if raw_score.startswith("AV:"):
+                      return float(CVSS2(raw_score).scores()[0])
+              except Exception:
+                  pass
+
+              # Fallback for plain numeric scores, for example:
+              # 7.5
+              if re.fullmatch(r"10(?:\.0)?|[0-9](?:\.[0-9])?", raw_score):
+                  return float(raw_score)
+
+              return None
+
+          def extract_scores(vuln):
+              scores = []
+
+              for sev in vuln.get("severity", []) or []:
+                  score = score_from_raw_value(sev.get("score"))
+                  if score is not None:
+                      scores.append(score)
+
+              database_specific = vuln.get("database_specific", {}) or {}
+              db_severity = database_specific.get("severity")
+
+              if isinstance(db_severity, (int, float)):
+                  scores.append(float(db_severity))
+              elif isinstance(db_severity, str):
+                  score = score_from_raw_value(db_severity)
+                  if score is not None:
+                      scores.append(score)
+
+              return scores
+
           failing = []
-          results = data.get("results") or []
+          result_count = 0
+          vuln_count = 0
 
-          if not results:
-              print("No OSV results found.")
-              print("This usually means no supported package sources were found, or no vulnerabilities were found.")
-              print("CI passes.")
-              sys.exit(0)
+          for result in data.get("results", []) or []:
+              source = result.get("source", {}) or {}
+              source_path = source.get("path", "unknown source")
 
-          for result in results:
-              for package in result.get("packages") or []:
-                  pkg = package.get("package") or {}
-                  vulns = package.get("vulnerabilities") or []
-                  
-          for result in data.get("results", []):
-              for package in result.get("packages", []):
-                  pkg = package.get("package", {})
-                  vulns = package.get("vulnerabilities", [])
+              for package in result.get("packages", []) or []:
+                  result_count += 1
 
-                  for vuln in vulns:
+                  pkg = package.get("package", {}) or {}
+                  package_name = pkg.get("name", "unknown package")
+                  package_version = pkg.get("version", "unknown version")
+
+                  for vuln in package.get("vulnerabilities", []) or []:
+                      vuln_count += 1
+
                       vuln_id = vuln.get("id", "UNKNOWN")
                       summary = vuln.get("summary", "")
-                      scores = []
 
-                      for sev in vuln.get("severity", []):
-                          raw_score = str(sev.get("score", ""))
-
-                          # Simple PoC: catches numeric CVSS values like 7.5 or 9.8.
-                          # Some OSV records use CVSS vectors; this PoC may not score those.
-                          match = re.search(r"\b(10(?:\.0)?|[0-9](?:\.[0-9])?)\b", raw_score)
-                          if match:
-                              scores.append(float(match.group(1)))
+                      scores = extract_scores(vuln)
 
                       if not scores:
-                          print(f"NO CVSS FOUND: {vuln_id} | {pkg.get('name')} | not failing CI")
+                          print(
+                              f"NO CVSS FOUND: {vuln_id} | "
+                              f"{package_name}=={package_version} | "
+                              f"{source_path} | not failing CI"
+                          )
                           continue
 
                       max_score = max(scores)
 
                       if max_score >= threshold:
-                          failing.append((vuln_id, max_score, pkg.get("name"), pkg.get("version"), summary))
+                          failing.append(
+                              (
+                                  vuln_id,
+                                  max_score,
+                                  package_name,
+                                  package_version,
+                                  source_path,
+                                  summary,
+                              )
+                          )
                       else:
-                          print(f"BELOW THRESHOLD: {vuln_id} | CVSS {max_score} | {pkg.get('name')}")
+                          print(
+                              f"BELOW THRESHOLD: {vuln_id} | "
+                              f"CVSS {max_score} | "
+                              f"{package_name}=={package_version} | "
+                              f"{source_path}"
+                          )
+
+          print("")
+          print(f"OSV package result entries checked: {result_count}")
+          print(f"OSV vulnerabilities checked: {vuln_count}")
+          print(f"CVSS threshold: {threshold}")
 
           if failing:
               print("")
               print(f"Failing because these findings are >= CVSS {threshold}:")
-              for vuln_id, score, name, version, summary in failing:
-                  print(f"- {vuln_id} | CVSS {score} | {name}=={version}")
+              for vuln_id, score, name, version, source_path, summary in failing:
+                  print(f"- {vuln_id} | CVSS {score} | {name}=={version} | {source_path}")
                   if summary:
                       print(f"  {summary}")
               sys.exit(1)
 
+          print("")
           print(f"No vulnerabilities at or above CVSS {threshold}. CI passes.")
           PY
 
-      - name: Upload OSV result JSON
+      - name: Upload OSV artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: osv-results
-          path: osv-results.json
+          path: |
+            osv-results.json
+            requirements-runtime-osv.txt
+            requirements-dev-osv.txt
+Message Wajid Zahoor
