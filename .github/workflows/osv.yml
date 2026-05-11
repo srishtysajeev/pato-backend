@@ -25,10 +25,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      # Generate runtime and dev dependency files separately.
-      # This makes it clearer which dependency set OSV scanned,
-      # and avoids mixing everything into one --all-extras file.
-      - name: Generate requirements files for OSV
+      - name: Generate runtime requirements file for OSV
         run: |
           python -m pip install --upgrade pip
           python -m pip install uv
@@ -36,18 +33,11 @@ jobs:
           echo "Generating runtime requirements..."
           uv pip compile pyproject.toml -o requirements-runtime-osv.txt
 
-          echo "Generating dev requirements..."
-          uv pip compile pyproject.toml --extra dev -o requirements-dev-osv.txt
-
           echo ""
           echo "===== Runtime requirements ====="
           cat requirements-runtime-osv.txt
 
-          echo ""
-          echo "===== Dev requirements ====="
-          cat requirements-dev-osv.txt
-
-      - name: Run OSV-Scanner using official action
+      - name: Run OSV-Scanner on runtime dependencies
         uses: google/osv-scanner-action/osv-scanner-action@v2.3.5
         continue-on-error: true
         with:
@@ -56,7 +46,6 @@ jobs:
             --format=json
             --output-file=osv-results.json
             -L requirements-runtime-osv.txt
-            -L requirements-dev-osv.txt
 
       - name: Fail only above CVSS threshold
         run: |
@@ -90,24 +79,18 @@ jobs:
               if not raw_score:
                   return None
 
-              # CVSS v3 vector, for example:
-              # CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H
               try:
                   if raw_score.startswith("CVSS:3."):
                       return float(CVSS3(raw_score).scores()[0])
               except Exception:
                   pass
 
-              # CVSS v2 vector, for example:
-              # AV:N/AC:L/Au:N/C:P/I:P/A:P
               try:
                   if raw_score.startswith("AV:"):
                       return float(CVSS2(raw_score).scores()[0])
               except Exception:
                   pass
 
-              # Fallback for plain numeric scores, for example:
-              # 7.5
               if re.fullmatch(r"10(?:\.0)?|[0-9](?:\.[0-9])?", raw_score):
                   return float(raw_score)
 
@@ -211,4 +194,3 @@ jobs:
           path: |
             osv-results.json
             requirements-runtime-osv.txt
-            requirements-dev-osv.txt
